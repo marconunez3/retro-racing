@@ -1,0 +1,126 @@
+/* File: adc.c
+ * 
+ * Author: Manuel Argueta
+ * 
+ * The file adc.c contains the implementation code for a driver to communiucate
+ * the Mango-Pi with a AD1115 Analog-to-Digital converter that runs on the I2C
+ * protocol. All information gathered was taken from data sheet found at: 
+ * https://cdn-shop.adafruit.com/datasheets/ads1115.pdf
+ */
+
+#include "i2c.h"
+#include "adc.h"
+#include "printf.h"
+#include "timer.h"
+#include <stddef.h>
+
+#define CONVERSION_PTR 0x00
+#define CONFIG_PTR 0x01
+#define MUX_OFFSET 12
+#define CONFIG_OS 0x8000
+#define CONFIG_COMP_QUE_DISABLE 0x0003
+
+#define NO_PIN -1;
+#define BYTE_OFFSET 0x8
+
+// default values based on https://cdn-shop.adafruit.com/datasheets/ads1115.pdf
+#define AD1115_DEFAULT_ADDRESS 0x48
+
+static struct {
+    i2c_device_t *dev;
+    adc_mode_t mode;
+    adc_dr_t data_rate;
+    adc_gain_t gain;
+    int prev_pin_read; 
+} module;
+
+static const unsigned int CONFIG_GAIN[] = {0x0000, 0x0200, 0x0400, 0x0600, 0x0800, 0x0A00};
+static const unsigned int CONFIG_DR[] = {0x0000, 0x0020, 0x0040, 0x0060, 0x0080, 0x00A0, 0x00C0, 0x00E0};
+
+void adc_config(adc_mode_t mode, adc_gain_t gain, adc_dr_t dr) {
+    module.dev = i2c_new(AD1115_DEFAULT_ADDRESS);
+    module.gain = gain;
+    module.data_rate = dr;
+    module.mode = mode;
+    module.prev_pin_read = NO_PIN;
+    return;
+}
+
+int getCurrConfig(int analog_pin) {
+    int currConfig = 0x0;
+    if (module.mode == SINGLE_MODE) currConfig = CONFIG_OS;
+    currConfig |= (analog_pin & 0x07) << MUX_OFFSET; // set mux based on pin
+    currConfig |= CONFIG_GAIN[module.gain]; // set gain bits
+    currConfig |= CONFIG_DR[module.data_rate]; // set data rate bits
+    currConfig |= CONFIG_COMP_QUE_DISABLE; // disable comparator queue by default
+    return currConfig; 
+}
+
+bool isValidPin(int analog_pin) {
+    return (analog_pin >= 0 && analog_pin <= 3);
+}
+
+void write_ADC_register(int reg_ptr, int reg_val) {
+    unsigned char byteData[2];
+    byteData[0] = (reg_val >> BYTE_OFFSET) & 0xff; // extract MSB from reg_val
+    byteData[1] = reg_val & 0xff; // extract LSB for reg_val
+    i2c_write_reg_n(module.dev, reg_ptr, byteData, 2);
+    return; 
+}
+
+int read_ADC_register(int reg_ptr) {
+    unsigned char byteData[2];
+    i2c_read_reg_n(module.dev, reg_ptr, byteData, 2);
+    int regVal = ((byteData[0] & 0xff) << BYTE_OFFSET) + (byteData[1] && 0xff);
+    return regVal;
+}
+
+bool getConvertStatus() {
+    return (read_ADC_register(CONFIG_PTR) & CONFIG_OS);
+}
+
+int adc_read(int analog_pin, bool is_diff) {
+    if (module.mode == CONT_MODE && module.prev_pin_read == analog_pin) return read_ADC_register(CONVERSION_PTR);
+    
+    if (isValidPin(analog_pin)) analog_pin = is_diff ? analog_pin : analog_pin + 0x4;
+    else {
+	printf("error: cannot read invalid analog pin");
+	return -1;
+    }
+    
+    // set config register to appropriate value
+    write_ADC_register(CONFIG_PTR, getCurrConfig(analog_pin));
+    
+    // read conversion register
+    if (module.mode == SINGLE_MODE) { 
+	while (!getConvertStatus()); // poll config register until conversion complete     
+    } else timer_delay_ms((1 / module.data_rate) * 1000 + 1); // pause until conversion cycle completes
+    return read_ADC_register(CONVERSION_PTR);
+}
+
+void set_ADC_mode(adc_mode_t mode) {
+    module.mode = mode;
+    return;
+}
+
+adc_mode_t get_ADC_mode() {
+    return module.mode;
+}
+
+void set_ADC_gain(adc_gain_t gain) {
+    module.gain = gain;
+    return;
+}
+
+adc_gain_t get_ADC_gain() {
+    return module.gain;
+}
+
+void set_ADC_dr(adc_dr_t data_rate) {
+    module.data_rate = data_rate;
+    return;
+}
+
+adc_dr_t get_ADC_dr() {
+    return module.data_rate;
+}
